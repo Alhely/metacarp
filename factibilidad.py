@@ -21,6 +21,14 @@ __all__ = [
 ]
 
 
+def _aplicar_backend_gpu_placeholder(usar_gpu: bool) -> tuple[str, str]:
+    """Devuelve (backend_solicitado, backend_real) para trazabilidad futura."""
+    if not usar_gpu:
+        return "cpu", "cpu"
+    # Placeholder: aún no existe backend GPU real para factibilidad.
+    return "gpu", "cpu"
+
+
 def _dist(matriz: Any, a: int, b: int) -> float:
     """Distancia entre nodos ``a`` y ``b``; ``inf`` si no hay camino o dato ausente."""
     inf = float("inf")
@@ -216,6 +224,7 @@ def verificar_factibilidad(
     matriz_distancias: Any,
     *,
     marcador_depot_etiqueta: str | None = None,
+    usar_gpu: bool = False,
 ) -> FeasibilityResult:
     """
     Comprueba factibilidad CARP según cinco condiciones.
@@ -230,7 +239,9 @@ def verificar_factibilidad(
     vector solo es ayuda visual y se elimina antes de las comprobaciones.
 
     La matriz puede ser el ``dict`` anidado de Dijkstra o un ``numpy.ndarray`` 2D.
+    ``usar_gpu`` deja la API preparada para backend acelerado; hoy usa fallback CPU.
     """
+    _backend_solicitado, _backend_real = _aplicar_backend_gpu_placeholder(usar_gpu)
     det = FeasibilityDetails()
     mapa_et = construir_mapa_tareas_por_etiqueta(data)
     if not mapa_et:
@@ -299,6 +310,7 @@ def verificar_factibilidad_desde_instancia(
     *,
     root: str | os.PathLike[str] | None = None,
     marcador_depot_etiqueta: str | None = None,
+    usar_gpu: bool = False,
 ) -> FeasibilityResult:
     """Carga instancia y matriz Dijkstra del paquete y llama a :func:`verificar_factibilidad`."""
     from .cargar_matrices import cargar_matriz_dijkstra
@@ -311,4 +323,5 @@ def verificar_factibilidad_desde_instancia(
         data,
         matriz,
         marcador_depot_etiqueta=marcador_depot_etiqueta,
+        usar_gpu=usar_gpu,
     )

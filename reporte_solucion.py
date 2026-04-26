@@ -35,6 +35,7 @@ def reporte_solucion(
     carpeta_salida: str | os.PathLike[str] | None = None,
     nombre_archivo: str | None = None,
     nombre_instancia: str = "instancia",
+    usar_gpu: bool = False,
 ) -> ReporteSolucionResult:
     """
     Genera un reporte textual detallado para una solución con formato por etiquetas:
@@ -46,6 +47,7 @@ def reporte_solucion(
     - Muestra [RETORNO] al depósito y totales por vehículo y total de la solución.
 
     Si ``guardar=True``, escribe el reporte en disco.
+    ``usar_gpu`` deja la API preparada para backend acelerado; hoy usa fallback CPU.
     """
     deposito = int(data.get("DEPOSITO", 1))
     capacidad_max = float(data.get("CAPACIDAD", 0) or 0)
@@ -91,7 +93,7 @@ def reporte_solucion(
 
             # Deadheading hasta u (si hace falta)
             if nodo_grafo(nodo_actual) != nodo_grafo(u):
-                path = shortest_path_nodes(G, nodo_actual, u)
+                path = shortest_path_nodes(G, nodo_actual, u, usar_gpu=usar_gpu)
                 edges, costo_dh = path_edges_and_cost(G, path)
                 lineas.append(
                     f"  [DEADHEADING] {nodo_actual} -> {u} (para servir {etiqueta_str} {u}->{v}) "
@@ -114,7 +116,7 @@ def reporte_solucion(
 
         # Retorno a depósito
         if nodo_grafo(nodo_actual) != nodo_grafo(deposito):
-            path = shortest_path_nodes(G, nodo_actual, deposito)
+            path = shortest_path_nodes(G, nodo_actual, deposito, usar_gpu=usar_gpu)
             edges, costo_ret = path_edges_and_cost(G, path)
             lineas.append(
                 f"  [RETORNO] {nodo_actual} -> Depósito {deposito} Caminos: {path} (Costo: {costo_ret})"
@@ -159,6 +161,7 @@ def reporte_solucion_desde_instancia(
     solucion: Sequence[Sequence[Hashable]],
     *,
     root: str | os.PathLike[str] | None = None,
+    usar_gpu: bool = False,
     **kwargs: Any,
 ) -> ReporteSolucionResult:
     """Carga ``data`` y ``G`` del paquete y genera el reporte."""
@@ -167,5 +170,12 @@ def reporte_solucion_desde_instancia(
 
     data = load_instances(nombre_instancia, root=root)
     G = cargar_objeto_gexf(nombre_instancia, root=root)
-    return reporte_solucion(solucion, data, G, nombre_instancia=nombre_instancia, **kwargs)
+    return reporte_solucion(
+        solucion,
+        data,
+        G,
+        nombre_instancia=nombre_instancia,
+        usar_gpu=usar_gpu,
+        **kwargs,
+    )
 

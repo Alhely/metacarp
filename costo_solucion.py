@@ -43,6 +43,7 @@ def costo_solucion(
     nombre_instancia: str = "instancia",
     nombre_archivo_detalle: str | None = None,
     marcador_depot_etiqueta: str | None = None,
+    usar_gpu: bool = False,
 ) -> CostoSolucionResult:
     """
     Calcula el costo total de una solución en formato lista de rutas ``[[],[],...]``.
@@ -55,6 +56,8 @@ def costo_solucion(
     Por cada tarea se suma el DH (tránsito) y el costo/demanda de servicio; al final el
     regreso al depósito. El DH usa el mismo criterio que :func:`reporte_solucion`:
     camino mínimo con peso ``cost`` y costo como **suma de arcos** del camino.
+
+    ``usar_gpu`` deja la API preparada para backend acelerado; hoy usa fallback CPU.
     """
     deposito = int(data.get("DEPOSITO", 1))
     capacidad_max = float(data.get("CAPACIDAD", 0) or 0)
@@ -110,7 +113,9 @@ def costo_solucion(
             etiqueta = tarea.get("tarea", str(id_tarea))
 
             if nodo_grafo(nodo_actual) != nodo_grafo(u):
-                costo_dh, camino_dh = costo_camino_minimo(G, nodo_actual, u)
+                costo_dh, camino_dh = costo_camino_minimo(
+                    G, nodo_actual, u, usar_gpu=usar_gpu
+                )
                 str_dh = " -> ".join(camino_dh)
             else:
                 costo_dh = 0.0
@@ -130,7 +135,9 @@ def costo_solucion(
             nodo_actual = v
 
         if nodo_grafo(nodo_actual) != nodo_grafo(deposito):
-            costo_ret, camino_ret = costo_camino_minimo(G, nodo_actual, deposito)
+            costo_ret, camino_ret = costo_camino_minimo(
+                G, nodo_actual, deposito, usar_gpu=usar_gpu
+            )
             str_ret = " -> ".join(camino_ret)
         else:
             costo_ret = 0.0
@@ -180,6 +187,7 @@ def costo_solucion_desde_instancia(
     carpeta_salida: str | os.PathLike[str] | None = None,
     root: str | os.PathLike[str] | None = None,
     marcador_depot_etiqueta: str | None = None,
+    usar_gpu: bool = False,
     **kwargs: Any,
 ) -> CostoSolucionResult:
     """Carga ``data`` (pickle) y ``G`` (GEXF) del paquete y evalúa el costo."""
@@ -196,5 +204,6 @@ def costo_solucion_desde_instancia(
         carpeta_salida=carpeta_salida,
         nombre_instancia=nombre_instancia,
         marcador_depot_etiqueta=marcador_depot_etiqueta,
+        usar_gpu=usar_gpu,
         **kwargs,
     )

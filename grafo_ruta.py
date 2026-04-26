@@ -14,6 +14,14 @@ __all__ = [
 ]
 
 
+def _aplicar_backend_gpu_placeholder(usar_gpu: bool) -> tuple[str, str]:
+    """Devuelve (backend_solicitado, backend_real) para trazabilidad futura."""
+    if not usar_gpu:
+        return "cpu", "cpu"
+    # Placeholder: aún no existe backend GPU real para rutas.
+    return "gpu", "cpu"
+
+
 def nodo_grafo(n: Any) -> str:
     """Convierte id de nodo de la instancia al tipo usado en el GEXF (str)."""
     return str(int(n))
@@ -33,8 +41,11 @@ def edge_cost(G: nx.Graph, a: str, b: str) -> float:
     raise KeyError(f"La arista {a}-{b} no tiene atributo 'cost'.")
 
 
-def shortest_path_nodes(G: nx.Graph, origen: Any, destino: Any) -> list[str]:
+def shortest_path_nodes(
+    G: nx.Graph, origen: Any, destino: Any, *, usar_gpu: bool = False
+) -> list[str]:
     """Secuencia de nodos del camino mínimo con peso ``cost``."""
+    _backend_solicitado, _backend_real = _aplicar_backend_gpu_placeholder(usar_gpu)
     s, t = nodo_grafo(origen), nodo_grafo(destino)
     if s not in G or t not in G:
         raise ValueError(f"Nodo {s} o {t} no está en el grafo.")
@@ -57,7 +68,9 @@ def path_edges_and_cost(
     return edges, total
 
 
-def costo_camino_minimo(G: nx.Graph, origen: Any, destino: Any) -> tuple[float, list[str]]:
+def costo_camino_minimo(
+    G: nx.Graph, origen: Any, destino: Any, *, usar_gpu: bool = False
+) -> tuple[float, list[str]]:
     """
     Costo total del camino mínimo ``origen -> destino`` como **suma de costos de arcos**.
 
@@ -66,6 +79,6 @@ def costo_camino_minimo(G: nx.Graph, origen: Any, destino: Any) -> tuple[float, 
     s, t = nodo_grafo(origen), nodo_grafo(destino)
     if s == t:
         return 0.0, [s]
-    path = shortest_path_nodes(G, origen, destino)
+    path = shortest_path_nodes(G, origen, destino, usar_gpu=usar_gpu)
     _edges, total = path_edges_and_cost(G, path)
     return total, path
