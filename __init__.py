@@ -34,6 +34,9 @@ from .factibilidad import (
     verificar_factibilidad,
     verificar_factibilidad_desde_instancia,
 )
+from .busqueda_tabu import BusquedaTabuResult, busqueda_tabu, busqueda_tabu_desde_instancia
+from .abejas import AbejasResult, busqueda_abejas, busqueda_abejas_desde_instancia
+from .cuckoo_search import CuckooSearchResult, cuckoo_search, cuckoo_search_desde_instancia
 from .grafo_ruta import (
     costo_camino_minimo,
     edge_cost,
@@ -43,6 +46,11 @@ from .grafo_ruta import (
 )
 from .instances import InstanceStore, dictionary_instances, load_instance, load_instances
 from .reporte_solucion import ReporteSolucionResult, reporte_solucion, reporte_solucion_desde_instancia
+from .recocido_simulado import (
+    RecocidoSimuladoResult,
+    recocido_simulado,
+    recocido_simulado_desde_instancia,
+)
 from .solucion_formato import (
     construir_mapa_tareas_por_etiqueta,
     etiquetas_tareas_requeridas,
@@ -76,6 +84,15 @@ __all__ = [
     "FeasibilityResult",
     "verificar_factibilidad",
     "verificar_factibilidad_desde_instancia",
+    "BusquedaTabuResult",
+    "busqueda_tabu",
+    "busqueda_tabu_desde_instancia",
+    "AbejasResult",
+    "busqueda_abejas",
+    "busqueda_abejas_desde_instancia",
+    "CuckooSearchResult",
+    "cuckoo_search",
+    "cuckoo_search_desde_instancia",
     "costo_camino_minimo",
     "edge_cost",
     "nodo_grafo",
@@ -87,6 +104,9 @@ __all__ = [
     "ReporteSolucionResult",
     "reporte_solucion",
     "reporte_solucion_desde_instancia",
+    "RecocidoSimuladoResult",
+    "recocido_simulado",
+    "recocido_simulado_desde_instancia",
     "construir_mapa_tareas_por_etiqueta",
     "etiquetas_tareas_requeridas",
     "normalizar_rutas_etiquetas",

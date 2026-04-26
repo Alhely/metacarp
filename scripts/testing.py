@@ -18,6 +18,9 @@ from pprint import pprint
 from typing import Any
 
 from metacarp import (
+    busqueda_abejas_desde_instancia,
+    busqueda_tabu_desde_instancia,
+    cuckoo_search_desde_instancia,
     OPERADORES_POPULARES,
     build_search_encoding,
     cargar_grafo,
@@ -45,6 +48,7 @@ from metacarp import (
     path_edges_and_cost,
     reporte_solucion,
     reporte_solucion_desde_instancia,
+    recocido_simulado_desde_instancia,
     ruta_gexf,
     ruta_imagen_estatica,
     ruta_matriz_dijkstra,
@@ -57,6 +61,7 @@ from metacarp import (
 
 INSTANCIA = "gdb19"
 SEED = 42
+GUARDAR_CSV_DEMO = False
 
 
 def titulo(txt: str) -> None:
@@ -490,6 +495,109 @@ def demo_encoding_y_vecindarios(data: dict, solucion: list[list[str]]) -> None:
     print(f"- primera ruta vecino gpu/fallback: {vecino_gpu[0] if vecino_gpu else []}")
 
 
+def demo_metaheuristicas() -> None:
+    titulo("BLOQUE E) METAHEURISTICAS - SA, TABU, ABEJAS, CUCKOO")
+    print(f"Instancia: {INSTANCIA} | seed: {SEED} | guardar_csv_demo={GUARDAR_CSV_DEMO}")
+
+    # Recocido Simulado (implementación clásica con enfriamiento geométrico).
+    sa = ejecutar_llamada(
+        comentario="Ejecuta Recocido Simulado con parámetros compactos para demo.",
+        modulo="metacarp.recocido_simulado",
+        codigo=(
+            "recocido_simulado_desde_instancia("
+            f"'{INSTANCIA}', temperatura_inicial=150.0, temperatura_minima=1e-3, "
+            "alpha=0.93, iteraciones_por_temperatura=40, max_enfriamientos=25, "
+            f"semilla={SEED}, guardar_csv=GUARDAR_CSV_DEMO)"
+        ),
+        fn=lambda: recocido_simulado_desde_instancia(
+            INSTANCIA,
+            temperatura_inicial=150.0,
+            temperatura_minima=1e-3,
+            alpha=0.93,
+            iteraciones_por_temperatura=40,
+            max_enfriamientos=25,
+            semilla=SEED,
+            guardar_csv=GUARDAR_CSV_DEMO,
+        ),
+    )
+    print(
+        f"- SA: mejor_costo={sa.mejor_costo} | gap={sa.gap_porcentaje:.4f}% | "
+        f"tiempo={sa.tiempo_segundos:.4f}s | csv={sa.archivo_csv}"
+    )
+
+    # Búsqueda Tabú.
+    tabu = ejecutar_llamada(
+        comentario="Ejecuta Búsqueda Tabú clásica con aspiración.",
+        modulo="metacarp.busqueda_tabu",
+        codigo=(
+            "busqueda_tabu_desde_instancia("
+            f"'{INSTANCIA}', iteraciones=120, tam_vecindario=16, tenure_tabu=15, "
+            f"semilla={SEED}, guardar_csv=GUARDAR_CSV_DEMO)"
+        ),
+        fn=lambda: busqueda_tabu_desde_instancia(
+            INSTANCIA,
+            iteraciones=120,
+            tam_vecindario=16,
+            tenure_tabu=15,
+            semilla=SEED,
+            guardar_csv=GUARDAR_CSV_DEMO,
+        ),
+    )
+    print(
+        f"- Tabu: mejor_costo={tabu.mejor_costo} | gap={tabu.gap_porcentaje:.4f}% | "
+        f"tiempo={tabu.tiempo_segundos:.4f}s | csv={tabu.archivo_csv}"
+    )
+
+    # Artificial Bee Colony (versión simplificada discreta).
+    abe = ejecutar_llamada(
+        comentario="Ejecuta metaheurística de Abejas (empleadas/observadoras/scouts).",
+        modulo="metacarp.abejas",
+        codigo=(
+            "busqueda_abejas_desde_instancia("
+            f"'{INSTANCIA}', iteraciones=120, num_fuentes=12, limite_abandono=20, "
+            f"semilla={SEED}, guardar_csv=GUARDAR_CSV_DEMO)"
+        ),
+        fn=lambda: busqueda_abejas_desde_instancia(
+            INSTANCIA,
+            iteraciones=120,
+            num_fuentes=12,
+            limite_abandono=20,
+            semilla=SEED,
+            guardar_csv=GUARDAR_CSV_DEMO,
+        ),
+    )
+    print(
+        f"- Abejas: mejor_costo={abe.mejor_costo} | gap={abe.gap_porcentaje:.4f}% | "
+        f"tiempo={abe.tiempo_segundos:.4f}s | csv={abe.archivo_csv}"
+    )
+
+    # Cuckoo Search discreto.
+    cko = ejecutar_llamada(
+        comentario="Ejecuta Cuckoo Search con vuelo tipo Levy discreto.",
+        modulo="metacarp.cuckoo_search",
+        codigo=(
+            "cuckoo_search_desde_instancia("
+            f"'{INSTANCIA}', iteraciones=120, num_nidos=14, pa_abandono=0.25, "
+            "pasos_levy_base=3, beta_levy=1.5, "
+            f"semilla={SEED}, guardar_csv=GUARDAR_CSV_DEMO)"
+        ),
+        fn=lambda: cuckoo_search_desde_instancia(
+            INSTANCIA,
+            iteraciones=120,
+            num_nidos=14,
+            pa_abandono=0.25,
+            pasos_levy_base=3,
+            beta_levy=1.5,
+            semilla=SEED,
+            guardar_csv=GUARDAR_CSV_DEMO,
+        ),
+    )
+    print(
+        f"- Cuckoo: mejor_costo={cko.mejor_costo} | gap={cko.gap_porcentaje:.4f}% | "
+        f"tiempo={cko.tiempo_segundos:.4f}s | csv={cko.archivo_csv}"
+    )
+
+
 def construir_mapa_tareas_por_etiqueta(data: dict) -> dict[str, dict]:
     """Wrapper local para evitar import extra en cada demo."""
     from metacarp import construir_mapa_tareas_por_etiqueta as _f
@@ -500,7 +608,7 @@ def construir_mapa_tareas_por_etiqueta(data: dict) -> dict[str, dict]:
 def main() -> None:
     titulo("GUIA EJECUTABLE AGRUPADA POR TIPO DE OBJETO")
     print("Orden de lectura recomendado:")
-    print("A) Instancia  -> B) Solucion  -> C) Grafo  -> D) Vecindarios/Encoding")
+    print("A) Instancia  -> B) Solucion  -> C) Grafo  -> D) Vecindarios/Encoding -> E) Metaheuristicas")
 
     demo_catalogos()
     data, matriz, grafo, solucion = demo_cargas_basicas()
@@ -508,6 +616,7 @@ def main() -> None:
     demo_factibilidad_y_costo(data, matriz, grafo, solucion)
     demo_grafo_utils(data, grafo, rutas_norm)
     demo_encoding_y_vecindarios(data, solucion)
+    demo_metaheuristicas()
 
     titulo("FIN")
     print("Script completado correctamente.")
