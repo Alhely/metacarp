@@ -215,6 +215,9 @@ def recocido_simulado(
     guardar_csv: bool = False,
     ruta_csv: str | None = None,
     nombre_instancia: str = "instancia",
+    id_corrida: str | None = None,
+    config_id: str | None = None,
+    repeticion: int | None = None,
 ) -> RecocidoSimuladoResult:
     """
     Recocido simulado clásico para minimizar costo de solución CARP.
@@ -364,6 +367,9 @@ def recocido_simulado(
         fila = {
             "metaheuristica": "recocido_simulado",
             "instancia": nombre_instancia,
+            "id_corrida": id_corrida or "",
+            "config_id": config_id or "",
+            "repeticion": repeticion if repeticion is not None else "",
             "semilla": semilla,
             "tiempo_segundos": elapsed,
             "iteraciones_totales": iteraciones_totales,
@@ -419,6 +425,9 @@ def recocido_simulado_desde_instancia(
     guardar_historial: bool = True,
     guardar_csv: bool = False,
     ruta_csv: str | None = None,
+    id_corrida: str | None = None,
+    config_id: str | None = None,
+    repeticion: int | None = None,
 ) -> RecocidoSimuladoResult:
     """
     Helper que carga instancia + grafo + objeto inicial y ejecuta recocido.
@@ -447,4 +456,7 @@ def recocido_simulado_desde_instancia(
         guardar_csv=guardar_csv,
         ruta_csv=ruta_csv,
         nombre_instancia=nombre_instancia,
+        id_corrida=id_corrida,
+        config_id=config_id,
+        repeticion=repeticion,
     )

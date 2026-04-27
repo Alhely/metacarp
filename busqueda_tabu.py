@@ -86,6 +86,9 @@ def busqueda_tabu(
     guardar_csv: bool = False,
     ruta_csv: str | None = None,
     nombre_instancia: str = "instancia",
+    id_corrida: str | None = None,
+    config_id: str | None = None,
+    repeticion: int | None = None,
 ) -> BusquedaTabuResult:
     """
     Búsqueda tabú clásica (short-term memory):
@@ -206,6 +209,9 @@ def busqueda_tabu(
         fila = {
             "metaheuristica": "busqueda_tabu",
             "instancia": nombre_instancia,
+            "id_corrida": id_corrida or "",
+            "config_id": config_id or "",
+            "repeticion": repeticion if repeticion is not None else "",
             "semilla": semilla,
             "tiempo_segundos": elapsed,
             "iteraciones_totales": iteraciones,
@@ -258,6 +264,9 @@ def busqueda_tabu_desde_instancia(
     guardar_historial: bool = True,
     guardar_csv: bool = False,
     ruta_csv: str | None = None,
+    id_corrida: str | None = None,
+    config_id: str | None = None,
+    repeticion: int | None = None,
 ) -> BusquedaTabuResult:
     """Helper de ejecución tabú cargando recursos desde la instancia."""
     data = load_instances(nombre_instancia, root=root)
@@ -279,4 +288,7 @@ def busqueda_tabu_desde_instancia(
         guardar_csv=guardar_csv,
         ruta_csv=ruta_csv,
         nombre_instancia=nombre_instancia,
+        id_corrida=id_corrida,
+        config_id=config_id,
+        repeticion=repeticion,
     )
