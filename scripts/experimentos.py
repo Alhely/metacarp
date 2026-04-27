@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from datetime import datetime
 from itertools import product
 from pathlib import Path
 from typing import Callable, Sequence
@@ -156,6 +157,20 @@ def _parse_args() -> argparse.Namespace:
         default=2,
         help="Número de repeticiones por configuración (por defecto: 2).",
     )
+    parser.add_argument(
+        "--experimento",
+        type=str,
+        default="tesis",
+        help="Etiqueta del experimento para el nombre de archivo CSV.",
+    )
+    parser.add_argument(
+        "--usar-gpu",
+        action="store_true",
+        help=(
+            "Activa backend GPU (CuPy) para evaluación por lotes (Tabu/Abejas/Cuckoo). "
+            "Si CuPy no está disponible se hace fallback automático a CPU rápido."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -179,9 +194,20 @@ def _resolver_metaheuristicas(raw: Sequence[str]) -> list[str]:
     return seleccion
 
 
-def _ruta_csv(salida_dir: Path, meta: str, instancia: str) -> Path:
-    # Un CSV por metaheurística e instancia (se irá acumulando una fila por corrida).
-    return salida_dir / meta / f"{instancia}.csv"
+def _ruta_csv(
+    salida_dir: Path,
+    meta: str,
+    instancia: str,
+    *,
+    experimento: str,
+    ydmh: str,
+) -> Path:
+    """
+    Un CSV por metaheurística e instancia, con nombre:
+    <metaheuristica>_<instancia>_<experimento>_YDMhm.csv
+    """
+    nombre = f"{meta}_{instancia}_{experimento}_{ydmh}.csv"
+    return salida_dir / meta / nombre
 
 
 def _espacio_parametros(runner: MetaRunner) -> list[dict[str, object]]:
@@ -207,6 +233,11 @@ def main() -> None:
         raise RuntimeError("No se encontraron instancias para ejecutar.")
     if args.repeticiones <= 0:
         raise ValueError("--repeticiones debe ser > 0.")
+    if not str(args.experimento).strip():
+        raise ValueError("--experimento no puede estar vacío.")
+
+    # Timestamp fijo para toda la corrida (YDMhm: year-day-month-hour-minute).
+    ydmh = datetime.now().strftime("%Y%d%m%H%M")
 
     total_planeadas = 0
     for meta in metas:
@@ -219,7 +250,9 @@ def main() -> None:
     print(f"Instancias       : {instancias}")
     print(f"Metaheurísticas  : {metas}")
     print(f"Seed base        : {args.seed}")
+    print(f"Experimento      : {args.experimento}")
     print(f"Repeticiones     : {args.repeticiones}")
+    print(f"Backend          : {'gpu (CuPy)' if args.usar_gpu else 'cpu (NumPy)'}")
     for meta in metas:
         print(f"Configs {meta:7s} : {len(_espacio_parametros(runners[meta]))}")
     print(f"Corridas planeadas: {total_planeadas}")
@@ -234,7 +267,13 @@ def main() -> None:
 
         for idx_meta, meta in enumerate(metas):
             runner = runners[meta]
-            ruta_csv = _ruta_csv(salida_dir, meta, instancia)
+            ruta_csv = _ruta_csv(
+                salida_dir,
+                meta,
+                instancia,
+                experimento=str(args.experimento).strip(),
+                ydmh=ydmh,
+            )
             configs = _espacio_parametros(runner)
 
             print(f"  -> {meta:7s} | configs={len(configs)} | csv={ruta_csv}")
@@ -257,6 +296,7 @@ def main() -> None:
                             "guardar_csv": True,
                             "ruta_csv": str(ruta_csv),
                             "guardar_historial": False,
+                            "usar_gpu": args.usar_gpu,
                         }
                     )
 

@@ -1,3 +1,19 @@
+"""
+Búsqueda Tabú clásica con memoria de corto plazo.
+
+Optimización
+------------
+- Construye un :class:`ContextoEvaluacion` una sola vez (matriz Dijkstra densa).
+- Cada vecino del lote se evalúa con :func:`costo_rapido` (10×–50× más rápido).
+
+GPU (opcional)
+--------------
+Cuando ``usar_gpu=True`` y CuPy está disponible, **el lote completo de vecinos
+por iteración** se evalúa en GPU con :func:`costo_lote_ids`. En instancias
+pequeñas no aporta speedup (overhead PCIe), en instancias grandes con
+``tam_vecindario >= 30`` sí compensa. Si CuPy no está disponible el código
+hace fallback transparente a CPU rápido.
+"""
 from __future__ import annotations
 
 import random
@@ -8,17 +24,19 @@ from typing import Any, Literal
 
 import networkx as nx
 
-from .busqueda_indices import build_search_encoding
+from .busqueda_indices import build_search_encoding, encode_solution
 from .cargar_grafos import cargar_objeto_gexf
 from .cargar_soluciones_iniciales import cargar_solucion_inicial
+from .evaluador_costo import costo_lote_ids, costo_rapido
 from .instances import load_instances
 from .metaheuristicas_utils import (
+    ContadorOperadores,
     calcular_metricas_gap,
+    construir_contexto_para_corrida,
     copiar_solucion_labels,
-    evaluar_costo_solucion,
     generar_reporte_detallado,
     guardar_resultado_csv,
-    seleccionar_mejor_inicial,
+    seleccionar_mejor_inicial_rapido,
     solucion_legible_humana,
 )
 from .vecindarios import MovimientoVecindario, OPERADORES_POPULARES, generar_vecino
@@ -47,24 +65,21 @@ class BusquedaTabuResult:
     movimientos_tabu_bloqueados: int
     mejoras: int
     semilla: int | None
+    backend_evaluacion: str = "cpu"
     historial_mejor_costo: list[float] = field(default_factory=list)
     ultimo_movimiento_aceptado: MovimientoVecindario | None = None
+    operadores_propuestos: dict[str, int] = field(default_factory=dict)
+    operadores_aceptados: dict[str, int] = field(default_factory=dict)
+    operadores_mejoraron: dict[str, int] = field(default_factory=dict)
+    operadores_trayectoria_mejor: dict[str, int] = field(default_factory=dict)
     archivo_csv: str | None = None
 
 
 def _clave_tabu(mov: MovimientoVecindario) -> tuple[Any, ...]:
-    """
-    Clave hashable del movimiento para memoria tabú.
-    Incluye operador, índices y labels movidos cuando estén disponibles.
-    """
+    """Clave hashable del movimiento para memoria tabú."""
     return (
-        mov.operador,
-        mov.ruta_a,
-        mov.ruta_b,
-        mov.i,
-        mov.j,
-        mov.k,
-        mov.l,
+        mov.operador, mov.ruta_a, mov.ruta_b,
+        mov.i, mov.j, mov.k, mov.l,
         tuple(mov.labels_movidos),
     )
 
@@ -89,13 +104,9 @@ def busqueda_tabu(
     id_corrida: str | None = None,
     config_id: str | None = None,
     repeticion: int | None = None,
+    root: str | None = None,
 ) -> BusquedaTabuResult:
-    """
-    Búsqueda tabú clásica (short-term memory):
-    - Explora un vecindario por iteración.
-    - Selecciona el mejor vecino no tabú (o por aspiración).
-    - Registra el movimiento en lista tabú por ``tenure_tabu`` iteraciones.
-    """
+    """Búsqueda tabú clásica (short-term memory)."""
     if iteraciones <= 0:
         raise ValueError("iteraciones debe ser > 0.")
     if tam_vecindario <= 0:
@@ -106,91 +117,103 @@ def busqueda_tabu(
     rng = random.Random(semilla)
     t0 = time.perf_counter()
 
-    sol_ref, costo_ref = seleccionar_mejor_inicial(
-        inicial_obj,
-        data,
-        G,
-        marcador_depot_etiqueta=marcador_depot_etiqueta,
-        usar_gpu=usar_gpu,
+    ctx = construir_contexto_para_corrida(
+        data, G,
+        nombre_instancia=nombre_instancia if nombre_instancia != "instancia" else None,
+        usar_gpu=usar_gpu, root=root,
     )
+
+    sol_ref, costo_ref = seleccionar_mejor_inicial_rapido(inicial_obj, ctx)
     sol_actual = copiar_solucion_labels(sol_ref)
     costo_actual = costo_ref
     sol_mejor = copiar_solucion_labels(sol_ref)
     costo_mejor = costo_ref
 
-    encoding = build_search_encoding(data) if backend_vecindario == "ids" else None
+    encoding = ctx.encoding
+    if backend_vecindario == "ids" and encoding is None:
+        encoding = build_search_encoding(data)
 
-    # Memoria tabú: clave_mov -> iteración de expiración.
     tabu_hasta: dict[tuple[Any, ...], int] = {}
-
     vecinos_evaluados = 0
     bloqueados = 0
     mejoras = 0
     ultimo_mov_aceptado: MovimientoVecindario | None = None
     historial_best: list[float] = []
+    contador = ContadorOperadores()
+
+    md_op = marcador_depot_etiqueta or ctx.marcador_depot
+    usar_gpu_lote = ctx.usar_gpu and tam_vecindario >= 16
 
     for it in range(iteraciones):
         if guardar_historial:
             historial_best.append(costo_mejor)
 
-        candidatos: list[tuple[float, list[list[str]], MovimientoVecindario, bool]] = []
-
         # Generamos un lote de vecinos para evaluar.
+        vecinos: list[list[list[str]]] = []
+        movimientos: list[MovimientoVecindario] = []
         for _ in range(tam_vecindario):
             vecino, mov = generar_vecino(
-                sol_actual,
-                rng=rng,
-                operadores=operadores,
-                marcador_depot=marcador_depot_etiqueta or "D",
-                devolver_con_deposito=True,
-                usar_gpu=usar_gpu,
-                backend=backend_vecindario,
-                encoding=encoding,
+                sol_actual, rng=rng, operadores=operadores,
+                marcador_depot=md_op, devolver_con_deposito=True,
+                usar_gpu=usar_gpu, backend=backend_vecindario, encoding=encoding,
             )
-            c = evaluar_costo_solucion(
-                vecino,
-                data,
-                G,
-                marcador_depot_etiqueta=marcador_depot_etiqueta,
-                usar_gpu=usar_gpu,
-            )
-            vecinos_evaluados += 1
+            vecinos.append(vecino)
+            movimientos.append(mov)
+            contador.proponer(mov.operador)
 
-            key = _clave_tabu(mov)
-            es_tabu = tabu_hasta.get(key, -1) > it
-            # Aspiración: permitimos movimiento tabú si mejora el mejor global.
-            aspiracion = c < costo_mejor
-            candidatos.append((c, vecino, mov, es_tabu and not aspiracion))
-
-        # Seleccionamos el mejor admisible.
-        admisibles = [x for x in candidatos if not x[3]]
-        if not admisibles:
-            # Si todos quedaron bloqueados, tomamos el mejor igual para no estancarnos.
-            bloqueados += len(candidatos)
-            elegido = min(candidatos, key=lambda t: t[0])
+        # Evaluación: GPU por lote para vecindarios grandes; CPU rápido en otro caso.
+        if usar_gpu_lote:
+            sols_ids = [encode_solution(v, ctx.encoding) for v in vecinos]
+            costos = costo_lote_ids(sols_ids, ctx).tolist()
         else:
-            bloqueados += sum(1 for x in candidatos if x[3])
-            elegido = min(admisibles, key=lambda t: t[0])
+            costos = [costo_rapido(v, ctx) for v in vecinos]
+        vecinos_evaluados += len(vecinos)
 
-        costo_sig, sol_sig, mov_sig, _bloq = elegido
-        sol_actual = sol_sig
-        costo_actual = costo_sig
-        ultimo_mov_aceptado = mov_sig
+        # Selección con criterio tabú + aspiración.
+        mejor_admisible_idx = -1
+        mejor_admisible_cost = float("inf")
+        mejor_total_idx = 0
+        mejor_total_cost = float("inf")
 
-        # Guardamos el movimiento aceptado en la memoria tabú.
-        tabu_hasta[_clave_tabu(mov_sig)] = it + tenure_tabu
+        for idx, c in enumerate(costos):
+            if c < mejor_total_cost:
+                mejor_total_cost = c
+                mejor_total_idx = idx
+            key = _clave_tabu(movimientos[idx])
+            es_tabu = tabu_hasta.get(key, -1) > it
+            aspiracion = c < costo_mejor
+            if es_tabu and not aspiracion:
+                continue
+            if c < mejor_admisible_cost:
+                mejor_admisible_cost = c
+                mejor_admisible_idx = idx
 
-        # Limpieza liviana de entradas vencidas.
+        if mejor_admisible_idx == -1:
+            elegido_idx = mejor_total_idx
+            bloqueados += len(costos)
+        else:
+            elegido_idx = mejor_admisible_idx
+            for idx, mov in enumerate(movimientos):
+                key = _clave_tabu(mov)
+                if tabu_hasta.get(key, -1) > it:
+                    bloqueados += 1
+
+        sol_actual = vecinos[elegido_idx]
+        costo_actual = costos[elegido_idx]
+        ultimo_mov_aceptado = movimientos[elegido_idx]
+        contador.aceptar(ultimo_mov_aceptado.operador)
+
+        tabu_hasta[_clave_tabu(ultimo_mov_aceptado)] = it + tenure_tabu
+
         if it % 25 == 0 and tabu_hasta:
-            expiradas = [k for k, vence in tabu_hasta.items() if vence <= it]
-            for k in expiradas:
+            for k in [k for k, vence in tabu_hasta.items() if vence <= it]:
                 del tabu_hasta[k]
 
-        # Actualizamos mejor global.
         if costo_actual < costo_mejor:
             costo_mejor = costo_actual
             sol_mejor = copiar_solucion_labels(sol_actual)
             mejoras += 1
+            contador.registrar_mejora(ultimo_mov_aceptado.operador)
 
     elapsed = time.perf_counter() - t0
     gap, mejora_abs, mejora_pct = calcular_metricas_gap(costo_ref, costo_mejor)
@@ -199,12 +222,10 @@ def busqueda_tabu(
     if guardar_csv:
         ruta = ruta_csv or f"resultados_busqueda_tabu_{nombre_instancia}.csv"
         detalle_txt, costo_total_reporte = generar_reporte_detallado(
-            sol_mejor,
-            data,
-            G,
+            sol_mejor, data, G,
             nombre_instancia=nombre_instancia,
             marcador_depot_etiqueta=marcador_depot_etiqueta,
-            usar_gpu=usar_gpu,
+            usar_gpu=False,
         )
         fila = {
             "metaheuristica": "busqueda_tabu",
@@ -213,6 +234,8 @@ def busqueda_tabu(
             "config_id": config_id or "",
             "repeticion": repeticion if repeticion is not None else "",
             "semilla": semilla,
+            "backend_evaluacion_solicitado": ctx.backend_solicitado,
+            "backend_evaluacion_real": ctx.backend_real,
             "tiempo_segundos": elapsed,
             "iteraciones_totales": iteraciones,
             "vecinos_evaluados": vecinos_evaluados,
@@ -226,6 +249,7 @@ def busqueda_tabu(
             "mejor_solucion_tr_legible": solucion_legible_humana(sol_mejor),
             "reporte_detalle_deadheading": detalle_txt,
             "costo_total_desde_reporte": costo_total_reporte,
+            **contador.resumen_csv(),
         }
         archivo_csv = guardar_resultado_csv(fila=fila, ruta_csv=ruta)
 
@@ -243,8 +267,13 @@ def busqueda_tabu(
         movimientos_tabu_bloqueados=bloqueados,
         mejoras=mejoras,
         semilla=semilla,
+        backend_evaluacion=ctx.backend_real,
         historial_mejor_costo=historial_best,
         ultimo_movimiento_aceptado=ultimo_mov_aceptado,
+        operadores_propuestos=contador.como_dict_ordenado(contador.propuestos),
+        operadores_aceptados=contador.como_dict_ordenado(contador.aceptados),
+        operadores_mejoraron=contador.como_dict_ordenado(contador.mejoraron),
+        operadores_trayectoria_mejor=contador.como_dict_ordenado(contador.trayectoria_mejor),
         archivo_csv=archivo_csv,
     )
 
@@ -273,9 +302,7 @@ def busqueda_tabu_desde_instancia(
     G = cargar_objeto_gexf(nombre_instancia, root=root)
     inicial_obj = cargar_solucion_inicial(nombre_instancia, root=root)
     return busqueda_tabu(
-        inicial_obj,
-        data,
-        G,
+        inicial_obj, data, G,
         iteraciones=iteraciones,
         tam_vecindario=tam_vecindario,
         tenure_tabu=tenure_tabu,
@@ -291,4 +318,5 @@ def busqueda_tabu_desde_instancia(
         id_corrida=id_corrida,
         config_id=config_id,
         repeticion=repeticion,
+        root=root,
     )

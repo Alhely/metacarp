@@ -1,3 +1,13 @@
+"""
+Cuckoo Search adaptado a espacio discreto para CARP.
+
+Optimización
+------------
+Construye un :class:`ContextoEvaluacion` una vez y evalúa con
+:func:`costo_rapido`. Cuando ``usar_gpu=True`` y CuPy está disponible, los
+``num_nidos`` cuckoos generados por iteración se evalúan en lote en GPU vía
+:func:`costo_lote_ids`.
+"""
 from __future__ import annotations
 
 import math
@@ -9,17 +19,19 @@ from typing import Any, Literal
 
 import networkx as nx
 
-from .busqueda_indices import build_search_encoding
+from .busqueda_indices import build_search_encoding, encode_solution
 from .cargar_grafos import cargar_objeto_gexf
 from .cargar_soluciones_iniciales import cargar_solucion_inicial
+from .evaluador_costo import costo_lote_ids, costo_rapido
 from .instances import load_instances
 from .metaheuristicas_utils import (
+    ContadorOperadores,
     calcular_metricas_gap,
+    construir_contexto_para_corrida,
     copiar_solucion_labels,
-    evaluar_costo_solucion,
     generar_reporte_detallado,
     guardar_resultado_csv,
-    seleccionar_mejor_inicial,
+    seleccionar_mejor_inicial_rapido,
     solucion_legible_humana,
 )
 from .vecindarios import MovimientoVecindario, OPERADORES_POPULARES, generar_vecino
@@ -49,31 +61,14 @@ class CuckooSearchResult:
     reemplazos_exitosos: int
     mejoras: int
     semilla: int | None
+    backend_evaluacion: str = "cpu"
     historial_mejor_costo: list[float] = field(default_factory=list)
     ultimo_movimiento_aceptado: MovimientoVecindario | None = None
+    operadores_propuestos: dict[str, int] = field(default_factory=dict)
+    operadores_aceptados: dict[str, int] = field(default_factory=dict)
+    operadores_mejoraron: dict[str, int] = field(default_factory=dict)
+    operadores_trayectoria_mejor: dict[str, int] = field(default_factory=dict)
     archivo_csv: str | None = None
-
-
-def _vecino_un_paso(
-    sol: list[list[str]],
-    *,
-    rng: random.Random,
-    operadores: Iterable[str],
-    marcador_depot_etiqueta: str | None,
-    usar_gpu: bool,
-    backend_vecindario: Literal["labels", "ids"],
-    encoding: Any,
-) -> tuple[list[list[str]], MovimientoVecindario]:
-    return generar_vecino(
-        sol,
-        rng=rng,
-        operadores=operadores,
-        marcador_depot=marcador_depot_etiqueta or "D",
-        devolver_con_deposito=True,
-        usar_gpu=usar_gpu,
-        backend=backend_vecindario,
-        encoding=encoding,
-    )
 
 
 def _vuelo_levy_discreto(
@@ -83,34 +78,46 @@ def _vuelo_levy_discreto(
     pasos_base: int,
     beta: float,
     operadores: Iterable[str],
-    marcador_depot_etiqueta: str | None,
+    marcador_depot: str,
     usar_gpu: bool,
     backend_vecindario: Literal["labels", "ids"],
     encoding: Any,
-) -> tuple[list[list[str]], MovimientoVecindario | None]:
+) -> tuple[list[list[str]], list[MovimientoVecindario]]:
     """
     Aproximación discreta de vuelo Levy:
-    número de pasos ~ 1 + floor(|N(0,1)|^(1/beta) * pasos_base), acotado.
+    ``n_pasos = 1 + floor(|N(0,1)|^(1/beta) * pasos_base)``, acotado a 12.
+
+    Devuelve la solución resultante y la **lista completa** de movimientos
+    aplicados, para que el llamador pueda contabilizar cada operador.
     """
     if beta <= 0:
         beta = 1.5
     x = abs(rng.gauss(0.0, 1.0))
-    n_pasos = 1 + int((x ** (1.0 / beta)) * max(1, pasos_base))
-    n_pasos = min(n_pasos, 12)  # tope razonable para no disparar costo por iteración.
+    n_pasos = min(12, 1 + int((x ** (1.0 / beta)) * max(1, pasos_base)))
 
     sol = copiar_solucion_labels(base)
-    ultimo: MovimientoVecindario | None = None
+    movs_seq: list[MovimientoVecindario] = []
     for _ in range(n_pasos):
-        sol, ultimo = _vecino_un_paso(
-            sol,
-            rng=rng,
-            operadores=operadores,
-            marcador_depot_etiqueta=marcador_depot_etiqueta,
-            usar_gpu=usar_gpu,
-            backend_vecindario=backend_vecindario,
-            encoding=encoding,
+        sol, m = generar_vecino(
+            sol, rng=rng, operadores=operadores,
+            marcador_depot=marcador_depot, devolver_con_deposito=True,
+            usar_gpu=usar_gpu, backend=backend_vecindario, encoding=encoding,
         )
-    return sol, ultimo
+        movs_seq.append(m)
+    return sol, movs_seq
+
+
+def _eval_costos(
+    vecinos: list[list[list[str]]],
+    ctx: Any,
+    *,
+    usar_gpu_lote: bool,
+) -> list[float]:
+    """GPU por lote si procede; si no, CPU rápido."""
+    if usar_gpu_lote and len(vecinos) >= 8:
+        sols_ids = [encode_solution(v, ctx.encoding) for v in vecinos]
+        return costo_lote_ids(sols_ids, ctx).tolist()
+    return [costo_rapido(v, ctx) for v in vecinos]
 
 
 def cuckoo_search(
@@ -135,13 +142,9 @@ def cuckoo_search(
     id_corrida: str | None = None,
     config_id: str | None = None,
     repeticion: int | None = None,
+    root: str | None = None,
 ) -> CuckooSearchResult:
-    """
-    Cuckoo Search clásico adaptado a espacio discreto:
-    - Cada cuckoo genera una solución candidata (vuelo tipo Levy).
-    - Si mejora un nido aleatorio, lo reemplaza.
-    - Una fracción de peores nidos se abandona y reinicializa.
-    """
+    """Cuckoo Search clásico adaptado a espacio discreto."""
     if iteraciones <= 0:
         raise ValueError("iteraciones debe ser > 0.")
     if num_nidos <= 1:
@@ -154,39 +157,34 @@ def cuckoo_search(
     rng = random.Random(semilla)
     t0 = time.perf_counter()
 
-    sol_ref, costo_ref = seleccionar_mejor_inicial(
-        inicial_obj,
-        data,
-        G,
-        marcador_depot_etiqueta=marcador_depot_etiqueta,
-        usar_gpu=usar_gpu,
+    ctx = construir_contexto_para_corrida(
+        data, G,
+        nombre_instancia=nombre_instancia if nombre_instancia != "instancia" else None,
+        usar_gpu=usar_gpu, root=root,
     )
-    encoding = build_search_encoding(data) if backend_vecindario == "ids" else None
+
+    sol_ref, costo_ref = seleccionar_mejor_inicial_rapido(inicial_obj, ctx)
+
+    encoding = ctx.encoding
+    if backend_vecindario == "ids" and encoding is None:
+        encoding = build_search_encoding(data)
+
+    md_op = marcador_depot_etiqueta or ctx.marcador_depot
+    usar_gpu_lote = ctx.usar_gpu
+
+    contador = ContadorOperadores()
 
     # Inicialización de nidos: mejor referencia + perturbaciones.
     nidos_sol: list[list[list[str]]] = [copiar_solucion_labels(sol_ref)]
     nidos_cost: list[float] = [costo_ref]
-    ultimos_movs: list[MovimientoVecindario | None] = [None]
     while len(nidos_sol) < num_nidos:
-        cand, mov = _vecino_un_paso(
-            copiar_solucion_labels(sol_ref),
-            rng=rng,
-            operadores=operadores,
-            marcador_depot_etiqueta=marcador_depot_etiqueta,
-            usar_gpu=usar_gpu,
-            backend_vecindario=backend_vecindario,
-            encoding=encoding,
-        )
-        c = evaluar_costo_solucion(
-            cand,
-            data,
-            G,
-            marcador_depot_etiqueta=marcador_depot_etiqueta,
-            usar_gpu=usar_gpu,
+        cand, _m = generar_vecino(
+            sol_ref, rng=rng, operadores=operadores,
+            marcador_depot=md_op, devolver_con_deposito=True,
+            usar_gpu=usar_gpu, backend=backend_vecindario, encoding=encoding,
         )
         nidos_sol.append(cand)
-        nidos_cost.append(c)
-        ultimos_movs.append(mov)
+        nidos_cost.append(costo_rapido(cand, ctx))
 
     idx_best = min(range(num_nidos), key=nidos_cost.__getitem__)
     sol_mejor = copiar_solucion_labels(nidos_sol[idx_best])
@@ -201,63 +199,63 @@ def cuckoo_search(
         if guardar_historial:
             historial_best.append(costo_mejor)
 
-        # Generación de cuckoos y competencia con nidos aleatorios.
+        # Generación de cuckoos por vuelo Levy.
+        cuckoos: list[list[list[str]]] = []
+        movs_levy: list[list[MovimientoVecindario]] = []
         for i in range(num_nidos):
-            cuckoo_sol, mov = _vuelo_levy_discreto(
-                nidos_sol[i],
-                rng=rng,
-                pasos_base=pasos_levy_base,
-                beta=beta_levy,
-                operadores=operadores,
-                marcador_depot_etiqueta=marcador_depot_etiqueta,
-                usar_gpu=usar_gpu,
-                backend_vecindario=backend_vecindario,
-                encoding=encoding,
+            cs, movs_seq = _vuelo_levy_discreto(
+                nidos_sol[i], rng=rng,
+                pasos_base=pasos_levy_base, beta=beta_levy,
+                operadores=operadores, marcador_depot=md_op,
+                usar_gpu=usar_gpu, backend_vecindario=backend_vecindario, encoding=encoding,
             )
-            cuckoo_cost = evaluar_costo_solucion(
-                cuckoo_sol,
-                data,
-                G,
-                marcador_depot_etiqueta=marcador_depot_etiqueta,
-                usar_gpu=usar_gpu,
-            )
+            cuckoos.append(cs)
+            movs_levy.append(movs_seq)
+            # Cada paso del vuelo Levy es una propuesta del operador.
+            for m in movs_seq:
+                contador.proponer(m.operador)
 
+        costos_cuckoos = _eval_costos(cuckoos, ctx, usar_gpu_lote=usar_gpu_lote)
+
+        # Competencia con un nido aleatorio.
+        for i in range(num_nidos):
             j = rng.randrange(num_nidos)
-            if cuckoo_cost < nidos_cost[j]:
-                nidos_sol[j] = cuckoo_sol
-                nidos_cost[j] = cuckoo_cost
-                ultimos_movs[j] = mov
+            if costos_cuckoos[i] < nidos_cost[j]:
+                nidos_sol[j] = cuckoos[i]
+                nidos_cost[j] = costos_cuckoos[i]
                 reemplazos += 1
-                ultimo_mov_aceptado = mov
+                # Aceptamos: atribuimos al último operador del vuelo (el que
+                # consolida la solución entregada al nido).
+                if movs_levy[i]:
+                    ultimo_mov_aceptado = movs_levy[i][-1]
+                    contador.aceptar(ultimo_mov_aceptado.operador)
 
-        # Abandono de una fracción de peores nidos.
+        # Abandono de los peores nidos (reemplazo en torno al mejor).
         n_abandonar = max(1, int(math.floor(pa_abandono * num_nidos)))
         peores = sorted(range(num_nidos), key=nidos_cost.__getitem__, reverse=True)[:n_abandonar]
         idx_best = min(range(num_nidos), key=nidos_cost.__getitem__)
         base_best = nidos_sol[idx_best]
-        for idx in peores:
-            nuevo, mov = _vuelo_levy_discreto(
-                base_best,
-                rng=rng,
-                pasos_base=pasos_levy_base,
-                beta=beta_levy,
-                operadores=operadores,
-                marcador_depot_etiqueta=marcador_depot_etiqueta,
-                usar_gpu=usar_gpu,
-                backend_vecindario=backend_vecindario,
-                encoding=encoding,
+        nuevos: list[list[list[str]]] = []
+        movs_abandono: list[list[MovimientoVecindario]] = []
+        for _idx in peores:
+            ns, ms = _vuelo_levy_discreto(
+                base_best, rng=rng,
+                pasos_base=pasos_levy_base, beta=beta_levy,
+                operadores=operadores, marcador_depot=md_op,
+                usar_gpu=usar_gpu, backend_vecindario=backend_vecindario, encoding=encoding,
             )
-            c = evaluar_costo_solucion(
-                nuevo,
-                data,
-                G,
-                marcador_depot_etiqueta=marcador_depot_etiqueta,
-                usar_gpu=usar_gpu,
-            )
-            nidos_sol[idx] = nuevo
-            nidos_cost[idx] = c
-            ultimos_movs[idx] = mov
+            nuevos.append(ns)
+            movs_abandono.append(ms)
+            for m in ms:
+                contador.proponer(m.operador)
+        costos_nuevos = _eval_costos(nuevos, ctx, usar_gpu_lote=usar_gpu_lote)
+        for k, idx in enumerate(peores):
+            nidos_sol[idx] = nuevos[k]
+            nidos_cost[idx] = costos_nuevos[k]
             abandonos += 1
+            # El abandono reemplaza incondicionalmente: contamos como aceptado.
+            if movs_abandono[k]:
+                contador.aceptar(movs_abandono[k][-1].operador)
 
         # Mejor global.
         idx_best = min(range(num_nidos), key=nidos_cost.__getitem__)
@@ -265,6 +263,8 @@ def cuckoo_search(
             costo_mejor = nidos_cost[idx_best]
             sol_mejor = copiar_solucion_labels(nidos_sol[idx_best])
             mejoras += 1
+            op_mejor = ultimo_mov_aceptado.operador if ultimo_mov_aceptado else None
+            contador.registrar_mejora(op_mejor)
 
     elapsed = time.perf_counter() - t0
     gap, mejora_abs, mejora_pct = calcular_metricas_gap(costo_ref, costo_mejor)
@@ -273,12 +273,10 @@ def cuckoo_search(
     if guardar_csv:
         ruta = ruta_csv or f"resultados_cuckoo_search_{nombre_instancia}.csv"
         detalle_txt, costo_total_reporte = generar_reporte_detallado(
-            sol_mejor,
-            data,
-            G,
+            sol_mejor, data, G,
             nombre_instancia=nombre_instancia,
             marcador_depot_etiqueta=marcador_depot_etiqueta,
-            usar_gpu=usar_gpu,
+            usar_gpu=False,
         )
         fila = {
             "metaheuristica": "cuckoo_search",
@@ -287,6 +285,8 @@ def cuckoo_search(
             "config_id": config_id or "",
             "repeticion": repeticion if repeticion is not None else "",
             "semilla": semilla,
+            "backend_evaluacion_solicitado": ctx.backend_solicitado,
+            "backend_evaluacion_real": ctx.backend_real,
             "tiempo_segundos": elapsed,
             "iteraciones_totales": iteraciones,
             "nidos": num_nidos,
@@ -301,6 +301,7 @@ def cuckoo_search(
             "mejor_solucion_tr_legible": solucion_legible_humana(sol_mejor),
             "reporte_detalle_deadheading": detalle_txt,
             "costo_total_desde_reporte": costo_total_reporte,
+            **contador.resumen_csv(),
         }
         archivo_csv = guardar_resultado_csv(fila=fila, ruta_csv=ruta)
 
@@ -319,8 +320,13 @@ def cuckoo_search(
         reemplazos_exitosos=reemplazos,
         mejoras=mejoras,
         semilla=semilla,
+        backend_evaluacion=ctx.backend_real,
         historial_mejor_costo=historial_best,
         ultimo_movimiento_aceptado=ultimo_mov_aceptado,
+        operadores_propuestos=contador.como_dict_ordenado(contador.propuestos),
+        operadores_aceptados=contador.como_dict_ordenado(contador.aceptados),
+        operadores_mejoraron=contador.como_dict_ordenado(contador.mejoraron),
+        operadores_trayectoria_mejor=contador.como_dict_ordenado(contador.trayectoria_mejor),
         archivo_csv=archivo_csv,
     )
 
@@ -351,9 +357,7 @@ def cuckoo_search_desde_instancia(
     G = cargar_objeto_gexf(nombre_instancia, root=root)
     inicial_obj = cargar_solucion_inicial(nombre_instancia, root=root)
     return cuckoo_search(
-        inicial_obj,
-        data,
-        G,
+        inicial_obj, data, G,
         iteraciones=iteraciones,
         num_nidos=num_nidos,
         pa_abandono=pa_abandono,
@@ -371,4 +375,5 @@ def cuckoo_search_desde_instancia(
         id_corrida=id_corrida,
         config_id=config_id,
         repeticion=repeticion,
+        root=root,
     )

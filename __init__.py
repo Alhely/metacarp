@@ -28,6 +28,15 @@ from .costo_solucion import (
     costo_solucion,
     costo_solucion_desde_instancia,
 )
+from .evaluador_costo import (
+    ContextoEvaluacion,
+    construir_contexto,
+    construir_contexto_desde_instancia,
+    costo_lote_ids,
+    costo_rapido,
+    costo_rapido_ids,
+    gpu_disponible,
+)
 from .factibilidad import (
     FeasibilityDetails,
     FeasibilityResult,
@@ -101,6 +110,13 @@ __all__ = [
     "CostoSolucionResult",
     "costo_solucion",
     "costo_solucion_desde_instancia",
+    "ContextoEvaluacion",
+    "construir_contexto",
+    "construir_contexto_desde_instancia",
+    "costo_lote_ids",
+    "costo_rapido",
+    "costo_rapido_ids",
+    "gpu_disponible",
     "ReporteSolucionResult",
     "reporte_solucion",
     "reporte_solucion_desde_instancia",
